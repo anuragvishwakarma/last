@@ -2,24 +2,42 @@
 import boto3
 import pandas as pd
 from datetime import datetime, timedelta
-from langchain_aws import ChatBedrock
 from langchain_community.vectorstores import FAISS
 from langchain_aws import BedrockEmbeddings
-from langchain_core.prompts import ChatPromptTemplate
+import json
 
-# Bedrock clients
+# === Direct Bedrock client (no LangChain LLM wrapper) ===
 bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
-llm = ChatBedrock(client=bedrock, model_id="amazon.nova-pro-v1:0")
-embeddings = BedrockEmbeddings(client=bedrock, model_id="amazon.titan-embed-text-v2:0")
 
-# Load FAISS
+def call_nova_pro(messages: list, max_tokens=1000) -> str:
+    """
+    Directly invoke Amazon Nova Pro with correct message format.
+    """
+    body = json.dumps({
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.3
+    })
+    response = bedrock.invoke_model(
+        modelId="amazon.nova-pro-v1:0",
+        contentType="application/json",
+        accept="application/json",
+        body=body
+    )
+    response_body = json.loads(response['body'].read())
+    return response_body['content'][0]['text']
+
+# === FAISS Setup ===
+embeddings = BedrockEmbeddings(
+    client=bedrock,
+    model_id="amazon.titan-embed-text-v2:0"
+)
 vectorstore = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
 
-# === MAINTENANCE SCHEDULE FROM PDFS (EN 12952 logic) ===
-# Based on tables in PDFs (e.g., Pos A = Safety valves → every 6 months)
+# === Maintenance Rules (from PDF tables) ===
 MAINTENANCE_RULES = {
     "A": {"interval_months": 6, "type": "T", "effort_hrs": 8},
-    "B": {"interval_months": 0.25, "type": "T", "effort_hrs": 2},  # weekly
+    "B": {"interval_months": 0.25, "type": "T", "effort_hrs": 2},
     "C": {"interval_months": 1, "type": "T", "effort_hrs": 4},
     "D": {"interval_months": 3, "type": "T", "effort_hrs": 2},
     "E": {"interval_months": 3, "type": "T", "effort_hrs": 4},
@@ -47,7 +65,6 @@ def workflow_manager_agent(equipment_id: str, pos: str):
         df_eq_pos["Date of Inspection"] = pd.to_datetime(df_eq_pos["Date of Inspection"], format="%m/%d/%Y")
         last_row = df_eq_pos.loc[df_eq_pos["Date of Inspection"].idxmax()]
         last_date = last_row["Date of Inspection"]
-        # Auto-assign: most frequent worker on this Pos
         worker = df_eq_pos["Fieldworker Name"].mode()
         assigned_worker = worker.iloc[0] if not worker.empty else "Unassigned"
 
@@ -74,11 +91,11 @@ def workflow_manager_agent(equipment_id: str, pos: str):
     }
 
 def coordinator(query: str):
-    # Retrieve context
+    # Step 1: Retrieve relevant context
     docs = vectorstore.similarity_search(query, k=8)
     context = "\n".join([d.page_content for d in docs])
     
-    # Extract equipment & pos (simple heuristic)
+    # Step 2: Extract equipment & pos
     equipment_id = None
     pos = None
     for token in query.split():
@@ -87,7 +104,7 @@ def coordinator(query: str):
         if len(token) == 1 and token in "ABCDEFGHIJKLMNOP":
             pos = token
 
-    # Get workflow recommendation if possible
+    # Step 3: Get workflow recommendation
     workflow_info = {}
     if equipment_id and pos and pos in MAINTENANCE_RULES:
         try:
@@ -95,37 +112,39 @@ def coordinator(query: str):
         except Exception as e:
             workflow_info = {"error": str(e)}
 
-    # Generate agent responses
-    tech_prompt = ChatPromptTemplate.from_template("Answer using ONLY the following technical manual excerpts:\n{context}\n\nQuestion: {query}")
-    maint_prompt = ChatPromptTemplate.from_template("Summarize maintenance history from logs:\n{context}\n\nQuestion: {query}")
+    # Step 4: Generate agent responses via direct Bedrock calls
+    tech_response = call_nova_pro([
+        {"role": "system", "content": "You are a Technical Spec Expert. Answer using ONLY the following technical manual excerpts:\n" + context},
+        {"role": "user", "content": "Question: " + query}
+    ])
 
-    tech_resp = (tech_prompt | llm).invoke({"context": context, "query": query})
-    maint_resp = (maint_prompt | llm).invoke({"context": context, "query": query})
+    maint_response = call_nova_pro([
+        {"role": "system", "content": "You are a Maintenance Log Analyst. Summarize maintenance history from logs:\n" + context},
+        {"role": "user", "content": "Question: " + query}
+    ])
 
-    # Final synthesis
+    # Step 5: Format workflow text
     workflow_text = ""
     if workflow_info and "error" not in workflow_info:
         status = "OVERDUE ⚠️" if workflow_info["overdue"] else "Scheduled"
         workflow_text = (
             f"\n\n🔧 **Workflow Recommendation**:\n"
             f"- Component: {workflow_info['component']} (Pos {workflow_info['pos']})\n"
-            f- Next due: {workflow_info['next_due']} ({status})\n"
+            f"- Next due: {workflow_info['next_due']} ({status})\n"
             f"- Assign to: **{workflow_info['assigned_to']}**\n"
             f"- Effort: {workflow_info['effort_hours']} hrs\n"
         )
+    elif "error" in workflow_info:
+        workflow_text = f"\n\n⚠️ **Workflow Error**: {workflow_info['error']}"
 
-    final_prompt = ChatPromptTemplate.from_template(
-        "You are a Field Support Coordinator. Answer clearly and concisely.\n\n"
-        "Technical Guidance:\n{tech}\n\n"
-        "Maintenance History:\n{maint}\n\n"
-        "{workflow}\n\n"
-        "User Query: {query}\n\nAnswer:"
-    )
-    
-    response = final_prompt.format(
-        tech=tech_resp.content,
-        maint=maint_resp.content,
-        workflow=workflow_text,
-        query=query
-    )
-    return llm.invoke(response).content
+    # Step 6: Final synthesis
+    final_response = call_nova_pro([
+        {"role": "system", "content": "You are a Field Support Coordinator. Answer clearly and concisely."},
+        {"role": "user", "content": 
+         "Technical Guidance:\n" + tech_response + "\n\n"
+         "Maintenance History:\n" + maint_response + "\n\n"
+         + workflow_text + "\n\n"
+         "User Query: " + query}
+    ])
+
+    return final_response
