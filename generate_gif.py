@@ -1,85 +1,92 @@
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from matplotlib.animation import FuncAnimation
+import matplotlib.animation as animation
 import imageio
 import os
 import numpy as np
 
-# Create output folder
+# Create output dir
 os.makedirs("fsma_gif", exist_ok=True)
 
-# Define steps in order
-steps = [
-    "User Query\n(Streamlit UI)",
-    "Query Parser\n(Extract Equipment & Pos)",
-    "FAISS Retrieval\n(PDFs + CSV)",
-    "Multi-Agent Processing\n• Tech Spec Agent\n• Maintenance Log Analyst\n• Workflow Manager",
-    "Response Synthesis\n(Combine all insights)",
-    "Final Answer\n(Display in UI)"
+# Define stages (left to right)
+stages = [
+    "User\nQuery",
+    "Streamlit\nUI",
+    "FAISS\nRetrieval",
+    "Multi-Agent\nProcessing",
+    "Amazon Titan\n(LLM)",
+    "Final\nAnswer"
 ]
 
-colors = [
-    "#4A90E2",  # Blue
-    "#50C878",  # Emerald
-    "#FFA500",  # Orange
-    "#9B59B6",  # Purple
-    "#3498DB",  # Light Blue
-    "#2ECC71"   # Green
-]
+# Sub-steps for Multi-Agent
+sub_agents = ["• Tech Spec Agent", "• Maintenance Log Analyst", "• Workflow Manager"]
 
-# Generate frames
-filenames = []
-for i in range(len(steps)):
-    plt.figure(figsize=(10, 6))
-    ax = plt.gca()
-    ax.set_xlim(0, 10)
-    ax.set_ylim(0, 7)
+# Colors (AWS-inspired: Bedrock purple, FAISS orange, etc.)
+colors = ["#232F3E", "#FF9900", "#FF4500", "#8A2BE2", "#28A745", "#1E88E5"]
+
+# Animation settings
+n_frames = 60  # 2 sec at 30 fps
+current_step = 0
+
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.set_xlim(-1, len(stages))
+ax.set_ylim(-2, 2)
+ax.axis('off')
+fig.patch.set_facecolor('#FFFFFF')
+
+def animate(frame):
+    global current_step
+    ax.clear()
+    ax.set_xlim(-1, len(stages))
+    ax.set_ylim(-2, 2)
     ax.axis('off')
     
-    # Draw all steps (dimmed)
-    for j, step in enumerate(steps):
-        y = 6 - j * 1.0
-        alpha = 0.3 if j > i else 1.0
-        color = colors[j] if j <= i else "#CCCCCC"
-        rect = patches.FancyBboxPatch(
-            (1, y - 0.4), 8, 0.8,
-            boxstyle="round,pad=0.3",
-            linewidth=2,
-            edgecolor=color,
-            facecolor=color if j <= i else "#F0F0F0",
-            alpha=alpha
-        )
-        ax.add_patch(rect)
-        plt.text(5, y, step, ha='center', va='center', fontsize=12, fontweight='bold' if j <= i else 'normal', color='white' if j <= i else 'black')
-    
-    # Add title
-    plt.title("Field Support & Maintenance Assistant (FSMA)\nPowered by Amazon Bedrock + FAISS + Multi-Agent RAG", 
-              fontsize=14, weight='bold', pad=20)
-    
-    # Add arrows between active steps
-    for j in range(i):
-        y1 = 6 - j * 1.0 - 0.4
-        y2 = 6 - (j+1) * 1.0 + 0.4
-        plt.annotate('', xy=(5, y2), xytext=(5, y1),
-                     arrowprops=dict(arrowstyle='->', lw=2, color='#333333'))
-    
-    # Save frame
-    filename = f"fsma_gif/frame_{i}.png"
-    plt.savefig(filename, dpi=150, bbox_inches='tight')
-    filenames.append(filename)
-    plt.close()
+    progress = frame / n_frames
+    current_step = min(int(progress * len(stages)), len(stages))
 
-# Create GIF
-images = []
-for filename in filenames:
-    images.append(imageio.v2.imread(filename))
+    # Draw main pipeline
+    for i, stage in enumerate(stages):
+        x = i
+        y = 0
+        alpha = 0.3
+        color = "#CCCCCC"
+        text_color = "black"
+        
+        if i < current_step:
+            alpha = 1.0
+            color = colors[i]
+            text_color = "white"
+        elif i == current_step:
+            # Pulsing effect
+            pulse = 0.5 + 0.5 * np.sin(frame * 0.3)
+            alpha = 0.4 + 0.6 * pulse
+            color = colors[i]
+            text_color = "white"
 
-# Save final GIF
-output_path = "fsma_process_flow.gif"
-imageio.mimsave(output_path, images, fps=1, loop=0)
+        # Circle node
+        circle = plt.Circle((x, y), 0.4, color=color, alpha=alpha, ec='black', lw=1)
+        ax.add_patch(circle)
+        ax.text(x, y, stage, ha='center', va='center', fontsize=10, fontweight='bold', color=text_color)
 
-# Cleanup frames
-for filename in filenames:
-    os.remove(filename)
-os.rmdir("fsma_gif")
+        # Arrows
+        if i < len(stages) - 1:
+            ax.annotate('', xy=(x+0.6, y), xytext=(x+0.4, y),
+                        arrowprops=dict(arrowstyle='->', lw=2, color='#333333'))
 
-print(f"✅ GIF saved as: {output_path}")
+    # Draw sub-agents below Multi-Agent stage
+    if current_step > 3:
+        ma_x = 3
+        for j, agent in enumerate(sub_agents):
+            ax.text(ma_x, -0.8 - j*0.3, agent, ha='center', va='center', fontsize=9, color="#555555")
+
+    # Title
+    ax.text(2.5, 1.5, "Field Support & Maintenance Assistant (FSMA)", 
+            fontsize=14, fontweight='bold', ha='center')
+
+# Create animation
+anim = FuncAnimation(fig, animate, frames=n_frames, interval=100, repeat=True)
+
+# Save as GIF
+anim.save("fsma_workflow.gif", writer=animation.PillowWriter(fps=60))
+print("✅ GIF saved as: fsma_workflow.gif")
