@@ -1,80 +1,24 @@
+# agents.py
 import boto3
 import pandas as pd
 from datetime import datetime, timedelta
 from langchain_community.vectorstores import FAISS
-from langchain_aws import BedrockEmbeddings
-import json
+from langchain_aws import BedrockEmbeddings, ChatBedrockConverse
 
-bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
-
-def call_nova_pro(messages: list) -> str:
-    """
-    Invoke Amazon Nova Pro with STRICTLY compliant format.
-    - content must be list of { "type": "text", "text": "..." }
-    - Only 'user' or 'assistant' roles
-    - No extra parameters
-    """
-    clean_messages = []
-    for msg in messages:
-        if isinstance(msg, str):
-            # Convert raw string to valid user message
-            clean_messages.append({
-                "role": "user",
-                "content": [{"type": "text", "text": msg}]
-            })
-        elif isinstance(msg, dict):
-            role = msg.get("role")
-            content = msg.get("content", "")
-            
-            if role not in ["user", "assistant"]:
-                role = "user"  # fallback
-            
-            # Ensure content is in correct format
-            if isinstance(content, str):
-                content = [{"type": "text", "text": content}]
-            elif isinstance(content, list):
-                # Validate each item
-                new_content = []
-                for item in content:
-                    if isinstance(item, str):
-                        new_content.append({"type": "text", "text": item})
-                    elif isinstance(item, dict) and "text" in item:
-                        new_content.append({"type": "text", "text": item["text"]})
-                    else:
-                        new_content.append({"type": "text", "text": str(item)})
-                content = new_content
-            else:
-                content = [{"type": "text", "text": str(content)}]
-            
-            clean_messages.append({
-                "role": role,
-                "content": content
-            })
-        else:
-            clean_messages.append({
-                "role": "user",
-                "content": [{"type": "text", "text": str(msg)}]
-            })
-
-    body = json.dumps({"messages": clean_messages})
-
-    try:
-        response = bedrock.invoke_model(
-            modelId="amazon.nova-pro-v1:0",
-            contentType="application/json",
-            accept="application/json",
-            body=body
-        )
-        response_body = json.loads(response['body'].read())
-        return response_body['message']['content'][0]['text']
-    except Exception as e:
-        raise RuntimeError(f"Nova Pro call failed: {str(e)}")
-
-# Load FAISS
-embeddings = BedrockEmbeddings(client=bedrock, model_id="amazon.titan-embed-text-v2:0")
+# === Embeddings & FAISS (unchanged) ===
+bedrock_client = boto3.client("bedrock-runtime", region_name="us-east-1")
+embeddings = BedrockEmbeddings(client=bedrock_client, model_id="amazon.titan-embed-text-v2:0")
 vectorstore = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
 
-# === Maintenance Rules ===
+# === Nova Premier LLM ===
+llm = ChatBedrockConverse(
+    client=bedrock_client,
+    model="amazon.nova-premier-v1:0",  # ✅ Use Nova Premier
+    temperature=0.3,
+    max_tokens=1000,
+)
+
+# === Maintenance Rules (same as before) ===
 MAINTENANCE_RULES = {
     "A": {"interval_months": 6, "type": "T", "effort_hrs": 8},
     "B": {"interval_months": 0.25, "type": "T", "effort_hrs": 2},
@@ -153,22 +97,16 @@ def coordinator(query: str):
             workflow_info = {"error": str(e)}
 
     # Tech Agent
-    tech_prompt = (
-    "You are a Technical Spec Expert. Answer using ONLY the following technical manual excerpts:\n"
-    f"{context}\n\n"
-    f"Question: {query}"
+    tech_response = llm.invoke(
+        "You are a Technical Spec Expert. Answer using ONLY the following technical manual excerpts:\n" + context + "\n\nQuestion: " + query
     )
-    tech_resp = call_nova_pro([{"role": "user", "content": tech_prompt}])
 
     # Maint Agent
-    maint_prompt = (
-    "You are a Maintenance Log Analyst. Summarize maintenance history from logs:\n"
-    f"{context}\n\n"
-    f"Question: {query}"
+    maint_response = llm.invoke(
+        "You are a Maintenance Log Analyst. Summarize maintenance history from logs:\n" + context + "\n\nQuestion: " + query
     )
-    maint_resp = call_nova_pro([{"role": "user", "content": maint_prompt}])
 
-    # Format Workflow Text Safely
+    # Format Workflow Text
     workflow_text = ""
     if workflow_info and "error" not in workflow_info:
         status = "OVERDUE ⚠️" if workflow_info["overdue"] else "Scheduled"
@@ -184,11 +122,10 @@ def coordinator(query: str):
 
     # Final Synthesis
     final_prompt = (
-    "Technical Guidance:\n" + tech_resp + "\n\n"
-    "Maintenance History:\n" + maint_resp + "\n\n"
-    + workflow_text + "\n\n"
-    "User Query: " + query
+        "Technical Guidance:\n" + tech_response.content + "\n\n"
+        "Maintenance History:\n" + maint_response.content + "\n\n"
+        + workflow_text + "\n\n"
+        "User Query: " + query
     )
-    
-    final_response = call_nova_pro([{"role": "user", "content": final_prompt}])
-    return final_response
+    final_response = llm.invoke(final_prompt)
+    return final_response.content
