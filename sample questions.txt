@@ -1,0 +1,4 @@
+“When is the next inspection for safety valves on HCK_EQ003?”
+“Show me all leaks in feedwater system for HCK_EQ001 in 2024.”
+“Who should I assign to check Pos G on HCK_EQ004?”
+“What are the safety rules for boiler startup?”
