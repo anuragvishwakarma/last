@@ -1,4 +1,3 @@
-# agents.py
 import boto3
 import pandas as pd
 from datetime import datetime, timedelta
@@ -6,35 +5,42 @@ from langchain_community.vectorstores import FAISS
 from langchain_aws import BedrockEmbeddings
 import json
 
-# === Direct Bedrock client (no LangChain LLM wrapper) ===
 bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 
-def call_nova_pro(messages: list, max_tokens=1000) -> str:
-    """
-    Directly invoke Amazon Nova Pro with correct message format.
-    """
-    body = json.dumps({
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": 0.3
-    })
-    response = bedrock.invoke_model(
-        modelId="amazon.nova-pro-v1:0",
-        contentType="application/json",
-        accept="application/json",
-        body=body
-    )
-    response_body = json.loads(response['body'].read())
-    return response_body['content'][0]['text']
+def call_nova_pro(messages: list) -> str:
+    clean_messages = []
+    for msg in messages:
+        if isinstance(msg, str):
+            clean_messages.append({"role": "user", "content": msg})
+        elif isinstance(msg, dict):
+            if "role" not in msg or "content" not in msg:
+                raise ValueError(f"Invalid message: {msg}")
+            role = msg["role"]
+            if role == "system":
+                role = "user"
+            clean_messages.append({"role": role, "content": msg["content"]})
+        else:
+            raise ValueError(f"Unsupported message type: {type(msg)}")
 
-# === FAISS Setup ===
-embeddings = BedrockEmbeddings(
-    client=bedrock,
-    model_id="amazon.titan-embed-text-v2:0"
-)
+    body = json.dumps({"messages": clean_messages})
+
+    try:
+        response = bedrock.invoke_model(
+            modelId="amazon.nova-pro-v1:0",
+            contentType="application/json",
+            accept="application/json",
+            body=body
+        )
+        response_body = json.loads(response['body'].read())
+        return response_body['message']['content']
+    except Exception as e:
+        raise RuntimeError(f"Error calling Nova Pro: {str(e)}")
+
+# Load FAISS
+embeddings = BedrockEmbeddings(client=bedrock, model_id="amazon.titan-embed-text-v2:0")
 vectorstore = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
 
-# === Maintenance Rules (from PDF tables) ===
+# === Maintenance Rules ===
 MAINTENANCE_RULES = {
     "A": {"interval_months": 6, "type": "T", "effort_hrs": 8},
     "B": {"interval_months": 0.25, "type": "T", "effort_hrs": 2},
@@ -91,11 +97,11 @@ def workflow_manager_agent(equipment_id: str, pos: str):
     }
 
 def coordinator(query: str):
-    # Step 1: Retrieve relevant context
+    # Retrieve context
     docs = vectorstore.similarity_search(query, k=8)
     context = "\n".join([d.page_content for d in docs])
     
-    # Step 2: Extract equipment & pos
+    # Extract equipment & pos
     equipment_id = None
     pos = None
     for token in query.split():
@@ -104,7 +110,7 @@ def coordinator(query: str):
         if len(token) == 1 and token in "ABCDEFGHIJKLMNOP":
             pos = token
 
-    # Step 3: Get workflow recommendation
+    # Get workflow recommendation
     workflow_info = {}
     if equipment_id and pos and pos in MAINTENANCE_RULES:
         try:
@@ -112,18 +118,19 @@ def coordinator(query: str):
         except Exception as e:
             workflow_info = {"error": str(e)}
 
-    # Step 4: Generate agent responses via direct Bedrock calls
-    tech_response = call_nova_pro([
-        {"role": "system", "content": "You are a Technical Spec Expert. Answer using ONLY the following technical manual excerpts:\n" + context},
-        {"role": "user", "content": "Question: " + query}
-    ])
+    # Tech Agent
+    tech_messages = [
+        {"role": "user", "content": f"You are a Technical Spec Expert. Answer using ONLY the following technical manual excerpts:\n{context}\n\nQuestion: {query}"}
+    ]
+    tech_resp = call_nova_pro(tech_messages)
 
-    maint_response = call_nova_pro([
-        {"role": "system", "content": "You are a Maintenance Log Analyst. Summarize maintenance history from logs:\n" + context},
-        {"role": "user", "content": "Question: " + query}
-    ])
+    # Maint Agent
+    maint_messages = [
+        {"role": "user", "content": f"You are a Maintenance Log Analyst. Summarize maintenance history from logs:\n{context}\n\nQuestion: {query}"}
+    ]
+    maint_resp = call_nova_pro(maint_messages)
 
-    # Step 5: Format workflow text
+    # Format Workflow Text Safely
     workflow_text = ""
     if workflow_info and "error" not in workflow_info:
         status = "OVERDUE ⚠️" if workflow_info["overdue"] else "Scheduled"
@@ -137,14 +144,14 @@ def coordinator(query: str):
     elif "error" in workflow_info:
         workflow_text = f"\n\n⚠️ **Workflow Error**: {workflow_info['error']}"
 
-    # Step 6: Final synthesis
-    final_response = call_nova_pro([
-        {"role": "system", "content": "You are a Field Support Coordinator. Answer clearly and concisely."},
+    # Final Synthesis
+    final_messages = [
         {"role": "user", "content": 
-         "Technical Guidance:\n" + tech_response + "\n\n"
-         "Maintenance History:\n" + maint_response + "\n\n"
+         "Technical Guidance:\n" + tech_resp + "\n\n"
+         "Maintenance History:\n" + maint_resp + "\n\n"
          + workflow_text + "\n\n"
          "User Query: " + query}
-    ])
+    ]
 
+    final_response = call_nova_pro(final_messages)
     return final_response
