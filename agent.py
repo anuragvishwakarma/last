@@ -8,19 +8,53 @@ import json
 bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 
 def call_nova_pro(messages: list) -> str:
+    """
+    Invoke Amazon Nova Pro with STRICTLY compliant format.
+    - content must be list of { "type": "text", "text": "..." }
+    - Only 'user' or 'assistant' roles
+    - No extra parameters
+    """
     clean_messages = []
     for msg in messages:
         if isinstance(msg, str):
-            clean_messages.append({"role": "user", "content": msg})
+            # Convert raw string to valid user message
+            clean_messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": msg}]
+            })
         elif isinstance(msg, dict):
-            if "role" not in msg or "content" not in msg:
-                raise ValueError(f"Invalid message: {msg}")
-            role = msg["role"]
-            if role == "system":
-                role = "user"
-            clean_messages.append({"role": role, "content": msg["content"]})
+            role = msg.get("role")
+            content = msg.get("content", "")
+            
+            if role not in ["user", "assistant"]:
+                role = "user"  # fallback
+            
+            # Ensure content is in correct format
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            elif isinstance(content, list):
+                # Validate each item
+                new_content = []
+                for item in content:
+                    if isinstance(item, str):
+                        new_content.append({"type": "text", "text": item})
+                    elif isinstance(item, dict) and "text" in item:
+                        new_content.append({"type": "text", "text": item["text"]})
+                    else:
+                        new_content.append({"type": "text", "text": str(item)})
+                content = new_content
+            else:
+                content = [{"type": "text", "text": str(content)}]
+            
+            clean_messages.append({
+                "role": role,
+                "content": content
+            })
         else:
-            raise ValueError(f"Unsupported message type: {type(msg)}")
+            clean_messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": str(msg)}]
+            })
 
     body = json.dumps({"messages": clean_messages})
 
@@ -32,9 +66,9 @@ def call_nova_pro(messages: list) -> str:
             body=body
         )
         response_body = json.loads(response['body'].read())
-        return response_body['message']['content']
+        return response_body['message']['content'][0]['text']
     except Exception as e:
-        raise RuntimeError(f"Error calling Nova Pro: {str(e)}")
+        raise RuntimeError(f"Nova Pro call failed: {str(e)}")
 
 # Load FAISS
 embeddings = BedrockEmbeddings(client=bedrock, model_id="amazon.titan-embed-text-v2:0")
@@ -119,16 +153,20 @@ def coordinator(query: str):
             workflow_info = {"error": str(e)}
 
     # Tech Agent
-    tech_messages = [
-        {"role": "user", "content": f"You are a Technical Spec Expert. Answer using ONLY the following technical manual excerpts:\n{context}\n\nQuestion: {query}"}
-    ]
-    tech_resp = call_nova_pro(tech_messages)
+    tech_prompt = (
+    "You are a Technical Spec Expert. Answer using ONLY the following technical manual excerpts:\n"
+    f"{context}\n\n"
+    f"Question: {query}"
+    )
+    tech_resp = call_nova_pro([{"role": "user", "content": tech_prompt}])
 
     # Maint Agent
-    maint_messages = [
-        {"role": "user", "content": f"You are a Maintenance Log Analyst. Summarize maintenance history from logs:\n{context}\n\nQuestion: {query}"}
-    ]
-    maint_resp = call_nova_pro(maint_messages)
+    maint_prompt = (
+    "You are a Maintenance Log Analyst. Summarize maintenance history from logs:\n"
+    f"{context}\n\n"
+    f"Question: {query}"
+    )
+    maint_resp = call_nova_pro([{"role": "user", "content": maint_prompt}])
 
     # Format Workflow Text Safely
     workflow_text = ""
@@ -145,13 +183,12 @@ def coordinator(query: str):
         workflow_text = f"\n\n⚠️ **Workflow Error**: {workflow_info['error']}"
 
     # Final Synthesis
-    final_messages = [
-        {"role": "user", "content": 
-         "Technical Guidance:\n" + tech_resp + "\n\n"
-         "Maintenance History:\n" + maint_resp + "\n\n"
-         + workflow_text + "\n\n"
-         "User Query: " + query}
-    ]
-
-    final_response = call_nova_pro(final_messages)
+    final_prompt = (
+    "Technical Guidance:\n" + tech_resp + "\n\n"
+    "Maintenance History:\n" + maint_resp + "\n\n"
+    + workflow_text + "\n\n"
+    "User Query: " + query
+    )
+    
+    final_response = call_nova_pro([{"role": "user", "content": final_prompt}])
     return final_response
