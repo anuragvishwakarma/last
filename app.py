@@ -1,6 +1,6 @@
 # app.py
 import streamlit as st
-from agents import coordinator
+from agent import coordinator
 
 st.set_page_config(page_title="Field Support Assistant", layout="wide")
 st.title("🔧 Field Support & Maintenance Workflow Assistant")
